@@ -1,4 +1,4 @@
-# landblock
+# Landblock
 
 Generates annotated dungeon maps for Asheron's Call, straight from the game
 data. Nothing is hand-authored: floor plans and walls come out of the client
