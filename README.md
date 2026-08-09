@@ -1,4 +1,4 @@
-# Landblock
+# landblock
 
 Generates annotated dungeon maps for Asheron's Call, straight from the game
 data. Nothing is hand-authored: floor plans and walls come out of the client
@@ -44,6 +44,7 @@ python -m landblock --cell ... --portal ... --world ... \
 | `client_portal.dat` | your AC client install | yes — room meshes, terrain palette |
 | ACE-World `Database/` | github.com/ACEmulator/ACE-World | yes — every object on the map |
 | ACE-World patches | the matching patches repo | optional, strongly recommended |
+| `Landblocks.xlsx` | the community landblock spreadsheet | optional, `--annotations` |
 
 The two dats live in your client folder. Point `--world` at the directory that
 contains `3-Core/`. If you are using the 16 P.Y. world database, add
@@ -56,6 +57,20 @@ next to the SQL tree, so later runs start in about a second. Use
 
 A full end-of-retail run is about 1,000 dungeons, 25 minutes, and 200 MB.
 
+### Community annotations
+
+`--annotations Landblocks.xlsx` layers hand-verified work over the derived
+data. The spreadsheet knows things the game files cannot say: what a dungeon is
+called when no portal points at it, how you get in when the answer is a gem or
+a recall spell, and which landblocks are retired, seasonal, admin-only or
+flat-out inaccessible.
+
+The spreadsheet fills gaps rather than overriding. Where the ACE world data has
+an opinion it wins, because it is what the server actually runs; the sheet
+supplies the name when no portal names the place, the drop point when no portal
+weenie reaches it, and the verdict when there is no object data to judge by. Its
+categories, access methods and notes are added to the header either way.
+
 ---
 
 ## Options
@@ -64,12 +79,16 @@ A full end-of-retail run is about 1,000 dungeons, 25 minutes, and 200 MB.
 --all                    every landblock with interior cells
 --landblock HEX          one landblock, repeatable (e.g. --landblock 01F5)
 --dungeons-only          skip caves, buildings and housing (see below)
+--annotations FILE       community spreadsheet: names, categories, drop points
 --min-cells N            ignore trivial interiors (default 8)
 
---layout composite       one plan per dungeon (default via auto)
+--layout composite       one plan per dungeon
+--layout stack           floors in a single column, cut corridors numbered
+--layout flow            floors packed to a square sheet, cuts numbered
 --layout panels          one titled panel per floor, on a grid
---layout flow            every floor in clear space, cut corridors numbered
---layout auto            composite unless floors genuinely stack
+--layout auto            composite, or separated when floors sit on each other
+--overlap-threshold N    overlap above which floors are separated (default 0.30)
+--stack-max-floors N     above this, separated floors pack to a sheet (default 6)
 
 --scale N                pixels per metre (default 8)
 --style dungeon|maze     orange plan, or the blue maze look
@@ -152,6 +171,25 @@ comes out as a grid.
 directly against a missile cap documented as `85.0f / MetersToYards`, and a
 terrain cell's `squareLength` is 24, so the scale bar reads 24 m.
 
+**Separating floors.** Most dungeons read fine as one plan, because their
+floors sit beside each other rather than on top. Some do not: Acid Ziggurat has
+six floors sharing 64% of one footprint, and composited it is a solid mass of
+overlapping walls.
+
+`--layout auto` measures that overlap and separates the floors when it passes
+0.30, joining the cut corridors with matching red numbers.
+
+Floors are not separated one per panel, though. Splitting is only needed where
+floors sit on top of each other, so they are first binned into the fewest
+sheets that have no overlap *inside* a sheet -- greedy colouring over the
+overlaps graph, largest floor first. A wing here and a wing there that never
+touch get drawn together at their true positions, which is what a hand-drawn
+map does. Black Death Catacombs has 26 floors and needs only 8 sheets; Mines of
+Despair has 9 floors and needs 3.
+
+The sheets are then stacked in a column when there are six or fewer, or packed
+to a roughly square page when there are more.
+
 **Shells.** A floor with nothing on it that sits almost entirely inside the
 footprint of other floors is a roof or an empty storey, and drawing it just
 buries what it covers. Those are dropped before compositing; `--keep-shells`
@@ -185,6 +223,7 @@ render_map(0x01F5, cells, insts, links, world, 'aerfalle.png')
 | `landblock/dat.py` | dat container: header, B-tree directory, block chains |
 | `landblock/geom.py` | EnvCells, `0x0D` meshes, floors, walls, ramps |
 | `landblock/world.py` | weenie index and landblock instances, base + patches |
+| `landblock/annotations.py` | optional community spreadsheet loader |
 | `landblock/render.py` | floor grouping, layout and drawing |
 | `landblock/__main__.py` | command line |
 | `landblock/enums.json` | WeenieType and CreatureType, exported from ACE |
@@ -222,6 +261,10 @@ End-of-retail passes 772 of 772.
 ## Credits
 
 Dungeon geometry and meshes are read from the Asheron's Call client data files.
-Object placements come from the ACEmulator ACE-World database. Formats were
+Object placements come from the ACEmulator ACE-World database. The optional
+annotations come from the community Landblocks spreadsheet compiled after
+retail by Immortalbob, Beale, Sylence, Justin, Howard (Oberon), Proximal,
+High-Voltage, Cpl Brown, Zarto and Crimson Mage, with thanks to OptimShi and
+Pea. Formats were
 transcribed from ACEmulator's `ACE.DatLoader`. Layout conventions are modelled
 on the hand-drawn maps of the Asheron's Call mapping community.

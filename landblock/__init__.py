@@ -10,14 +10,15 @@
 
 Or from the command line: python -m landblock --help
 """
-from . import dat, geom, world, render          # submodules stay reachable
+from . import dat, geom, world, render, annotations   # submodules stay reachable
 from .dat import Dat, Reader
 from .geom import Geometry, read_environment
 from .world import World, coord_string, load_enums
 from .render import render as render_map, compute_floors, overlap_fraction, classify
+from .annotations import Annotations
 
-__version__ = '1.0.0'
-__all__ = ['dat', 'geom', 'world', 'render',
+__version__ = '1.1.0'
+__all__ = ['dat', 'geom', 'world', 'render', 'annotations', 'Annotations',
            'Dat', 'Reader', 'Geometry', 'read_environment', 'World',
            'coord_string', 'load_enums', 'render_map', 'compute_floors',
            'overlap_fraction', 'classify']

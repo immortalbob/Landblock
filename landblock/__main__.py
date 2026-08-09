@@ -100,7 +100,7 @@ def header_for(world, lb, geom, cells, insts):
 HOUSING_TYPES = {'House', 'SlumLord', 'Hook', 'Storage', 'HousePortal', 'Deed'}
 
 
-def is_dungeon(world, lb):
+def is_dungeon(world, lb, ann=None):
     """A dungeon has no physical way in.
 
     Caves and buildings sit in a landblock that also has objects standing on
@@ -109,7 +109,8 @@ def is_dungeon(world, lb):
     """
     insts, _links = world.instances(lb)
     if not insts:
-        return False
+        # no object data to judge by -- fall back to the spreadsheet
+        return bool(ann.is_dungeon(lb)) if ann is not None else False
     if any(i['cell'] < 0x100 for i in insts):
         return False
     for i in insts:
@@ -229,10 +230,14 @@ def main():
     ap.add_argument('--voids', action='store_true',
                     help='shade cells that appear to have no walkable floor '
                          '(heuristic; unreliable on stacked multi-storey dungeons)')
-    ap.add_argument('--layout', default='auto', choices=('auto', 'composite', 'panels', 'flow'),
+    ap.add_argument('--layout', default='auto', choices=('auto', 'composite', 'panels', 'flow', 'stack'),
                     help='auto draws one plan when levels barely stack, and one '
                          'panel per level when they do')
-    ap.add_argument('--overlap-threshold', type=float, default=0.40)
+    ap.add_argument('--overlap-threshold', type=float, default=0.30,
+                    help='overlap above which floors are separated')
+    ap.add_argument('--stack-max-floors', type=int, default=6,
+                    help='separated floors above this count are packed to a\n'
+                         ' sheet instead of stacked in one column')
     ap.add_argument('--explode', action='store_true',
                     help='experimental: slide overlapping floors apart and mark the\n'
                          ' severed corridors with matching numbers')
@@ -253,6 +258,9 @@ def main():
     ap.add_argument('--no-labels', action='store_true',
                     help='markers only, no text labels (denser dungeons stay readable)')
     ap.add_argument('--cache', default=None)
+    ap.add_argument('--annotations', default=None,
+                    help='AC Landblocks spreadsheet (.xlsx): community names, '
+                         'categories, access methods and hand-logged drop points')
     ap.add_argument('--patches', default=None,
                     help='ACE-World patches .../Database/Patches directory; '
                          'patch files replace the base file for that key')
@@ -268,6 +276,12 @@ def main():
     t0 = time.time()
     geom = Geometry(Dat(args.cell), Dat(args.portal))
     world = acworld.World(args.world, cache=args.cache, patch_core=args.patches)
+    ann = None
+    if args.annotations:
+        from .annotations import Annotations
+        ann = Annotations(args.annotations)
+        print('annotations: %d names, %d categories, %d with access recorded'
+              % (len(ann.names), len(ann.category), len(ann.access)))
     print('loaded dats + world index in %.1fs' % (time.time() - t0))
 
     todo = [int(x, 16) for x in args.landblock]
@@ -275,7 +289,7 @@ def main():
         idx = geom.landblocks_with_interiors()
         todo = sorted(lb for lb, cs in idx.items() if len(cs) >= args.min_cells)
     if args.dungeons_only:
-        todo = [lb for lb in todo if is_dungeon(world, lb)]
+        todo = [lb for lb in todo if is_dungeon(world, lb, ann)]
         print('dungeons only: %d landblocks' % len(todo))
     os.makedirs(args.out, exist_ok=True)
 
@@ -296,6 +310,14 @@ def main():
         insts, links = world.instances(lb)
         sub, lines = header_for(world, lb, geom, cells, insts)
         name = world.dungeon_name(lb)
+        drops = ()
+        if ann is not None:
+            name = name or ann.name(lb)          # ACE naming wins
+            lines = lines + ann.header_lines(lb)
+            # only hand-logged drops the game data does not already give us
+            known = {ep['dest'][0] & 0xFFFF for ep in world.entry_portals(lb)
+                     if ep['dest']}
+            drops = tuple(d for d in ann.drops.get(lb, ()) if d[0] not in known)
         slug = ''.join(ch if ch.isalnum() else '_' for ch in (name or '')).strip('_')
         fn = os.path.join(args.out, '%04X%s.png' % (lb, '_' + slug if slug else ''))
         if args.skip_existing and os.path.exists(fn):
@@ -316,13 +338,20 @@ def main():
             floor_of = acrender.compute_floors(cells, arr_cells)
         layout = args.layout
         if layout == 'auto':
-            layout = 'composite' if args.explode else (
-                'panels' if acrender.overlap_fraction(cells, floor_of=floor_of)
-                > args.overlap_threshold else 'composite')
+            # A plan is only honest where floors do not sit on each other. Past
+            # that, separate them -- in a single column when there are few
+            # floors, packed to a sheet when there are many, because a column
+            # of twenty-six floors is a scroll, not a map.
+            if acrender.overlap_fraction(cells, floor_of=floor_of) > args.overlap_threshold:
+                sheets = len(set(acrender.group_floors(cells, floor_of).values()))
+                layout = 'stack' if sheets <= args.stack_max_floors else 'flow'
+            else:
+                layout = 'composite'
         connectors = ()
-        if layout == 'flow':
+        if layout in ('flow', 'stack'):
             cells, insts, connectors = acrender.flow_layout(
-                cells, insts, floor_of, gap=args.flow_gap)
+                cells, insts, floor_of, gap=args.flow_gap,
+                columns=1 if layout == 'stack' else 0)
             layout = 'composite'
         elif layout == 'composite' and args.explode:
             cells, insts, connectors = acrender.explode(
@@ -338,7 +367,8 @@ def main():
                           % (lb, (name or '')[:30], len(info['levels']), info['cells']))
                 continue
             info = acrender.render(lb, cells, insts, links, world, fn,
-                                   connectors=connectors,
+                                   connectors=connectors, title=name,
+                                   extra_drops=drops,
                                    style=args.style, scale=args.scale,
                                    show_generators=args.generators,
                                    show_obstacles=args.obstacles,

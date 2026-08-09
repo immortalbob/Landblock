@@ -400,20 +400,77 @@ def _connectors(by_id, floor_of, world_off):
     return out
 
 
-def flow_layout(cells, insts, floor_of, gap=24.0):
-    """Lay every floor out separately, packed in reading order by depth.
+def group_floors(cells, floor_of, res=1.0, tolerance=0.02):
+    """Bin floors into the fewest sheets that have no overlap inside a sheet.
 
-    This is how the hand-drawn maps handle a dungeon whose floors sit on top of
-    each other: stop pretending one plan can show it, place each floor in clear
-    space, and join the cut corridors with matching numbers.
+    Splitting is only ever needed where floors sit on top of each other. Two
+    floors that do not share any footprint can be drawn together at their true
+    positions, which is what a hand-drawn map does -- a wing here, a wing
+    there, one plan. Greedy graph colouring over the overlaps, largest floor
+    first, so the big pieces anchor the sheets and the small ones fill in
+    around them.
     """
-    from .geom import shift_cell
-
-    pieces = collections.defaultdict(list)
+    by_floor = collections.defaultdict(list)
     for c in cells:
         f = floor_of.get(c.cell_id & 0xFFFF)
         if f is not None and c.floors:
-            pieces[f].append(c)
+            by_floor[f].append(c)
+    if len(by_floor) < 2:
+        return {f: 0 for f in by_floor}
+    pts = [p for c in cells for poly in c.floors for p in poly]
+    minx = min(p[0] for p in pts); miny = min(p[1] for p in pts)
+    w = int((max(p[0] for p in pts) - minx) / res) + 3
+    h = int((max(p[1] for p in pts) - miny) / res) + 3
+    masks, areas = {}, {}
+    for f, group in by_floor.items():
+        img = Image.new('L', (w, h), 0)
+        d = ImageDraw.Draw(img)
+        for c in group:
+            for poly in c.floors:
+                d.polygon([((p[0] - minx) / res, (p[1] - miny) / res) for p in poly], fill=255)
+        m = np.array(img) > 0
+        masks[f] = m
+        areas[f] = int(m.sum())
+    order = sorted(masks, key=lambda f: -areas[f])
+    sheets = []          # list of (union mask, [floors])
+    group_of = {}
+    for f in order:
+        placed = False
+        for i, (union, members) in enumerate(sheets):
+            inter = int((union & masks[f]).sum())
+            if inter <= tolerance * areas[f]:
+                sheets[i] = (union | masks[f], members + [f])
+                group_of[f] = i
+                placed = True
+                break
+        if not placed:
+            group_of[f] = len(sheets)
+            sheets.append((masks[f].copy(), [f]))
+    return group_of
+
+
+def flow_layout(cells, insts, floor_of, gap=24.0, columns=0):
+    """Lay every floor out separately, joined by matching numbers at the cuts.
+
+    This is how the hand-drawn maps handle a dungeon whose floors sit on top of
+    each other: stop pretending one plan can show it, place each floor in clear
+    space, and number the corridors that had to be severed.
+
+    columns=0 packs them in reading order to a roughly square sheet;
+    columns=1 stacks them in a single column, deepest floor at the bottom,
+    which is what a heavily interleaved dungeon needs.
+    """
+    from .geom import shift_cell
+
+    # bin floors into sheets that do not overlap internally, then lay the
+    # sheets out -- far fewer pieces than one per floor
+    group_of = group_floors(cells, floor_of)
+    piece_of = {k: group_of.get(v, 0) for k, v in floor_of.items()}
+    pieces = collections.defaultdict(list)
+    for c in cells:
+        p = piece_of.get(c.cell_id & 0xFFFF)
+        if p is not None and c.floors:
+            pieces[p].append(c)
     if len(pieces) < 2:
         return cells, insts, []
 
@@ -422,11 +479,20 @@ def flow_layout(cells, insts, floor_of, gap=24.0):
         pts = [p for c in group for poly in c.floors for p in poly]
         box[k] = (min(p[0] for p in pts), min(p[1] for p in pts),
                   max(p[0] for p in pts), max(p[1] for p in pts))
-    order = sorted(pieces, reverse=True)          # entry level first
+    # sheets are numbered from the top floor down, so entry comes first
+    depth = {}
+    for c in cells:
+        p = piece_of.get(c.cell_id & 0xFFFF)
+        if p is not None and c.floors:
+            depth.setdefault(p, []).append(floor_of.get(c.cell_id & 0xFFFF, 0))
+    order = sorted(pieces, key=lambda p: -max(depth.get(p, [0])))
     widths = [box[k][2] - box[k][0] for k in order]
     heights = [box[k][3] - box[k][1] for k in order]
-    area = sum(w * h for w, h in zip(widths, heights))
-    target = max(max(widths) + gap, (area * 1.6) ** 0.5)
+    if columns == 1:
+        target = 0.0                      # every floor wraps to its own row
+    else:
+        area = sum(w * h for w, h in zip(widths, heights))
+        target = max(max(widths) + gap, (area * 1.6) ** 0.5)
 
     world_off = {}
     x = y = 0.0
@@ -454,7 +520,7 @@ def flow_layout(cells, insts, floor_of, gap=24.0):
     out_insts = [dict(i, x=i['x'] + cell_off.get(i['cell'], (0, 0))[0],
                       y=i['y'] + cell_off.get(i['cell'], (0, 0))[1]) for i in insts]
     by_id = {c.cell_id & 0xFFFF: c for c in cells}
-    return out_cells, out_insts, _connectors(by_id, floor_of, world_off)
+    return out_cells, out_insts, _connectors(by_id, piece_of, world_off)
 
 
 def classify(world, wcid):
@@ -711,7 +777,7 @@ def render(lb, cells, insts, links, world, path, style='dungeon',
            scale=8, show_generators=False, show_obstacles=False, show_voids=False,
            void_gap=12.0,
            debug_cells=False, bbox=None, chrome=True, tone_level=None,
-           connectors=(), show_walls=True, label_repeat_max=3,
+           connectors=(), show_walls=True, label_repeat_max=3, extra_drops=(),
            npc_label_max=10,
            title=None, subtitle=None, header_lines=None, label_items=True):
     st = STYLES[style]
@@ -780,7 +846,14 @@ def render(lb, cells, insts, links, world, path, style='dungeon',
                 for nm, n in names.most_common(6):
                     widest = max(widest, 16 + probe0.textlength('- %s  x%d' % (nm, n), font=f_r))
             for wcid, _gx, _gy in bosses[:3]:
-                for item in (world.weenies.get(wcid, {}).get('loot') or [])[:5]:
+                loot = world.weenies.get(wcid, {}).get('loot') or []
+                if not loot:
+                    continue
+                # the drops heading is set in the bold face and is often the
+                # widest thing in the column -- measure it, not just the items
+                widest = max(widest, probe0.textlength('%s drops:' % world.name(wcid),
+                                                       font=_font(34, True)))
+                for item in loot[:5]:
                     widest = max(widest, 16 + probe0.textlength('- %s' % item, font=f_r))
             pad_l = int(min(max(460, widest + 70), 900))
         # the legend wraps, so size the bottom margin to the number of entries
@@ -1194,6 +1267,16 @@ def render(lb, cells, insts, links, world, path, style='dungeon',
 
     # arrival points: portals elsewhere that land here
     cell_ids = {c.cell_id & 0xFFFF for c in cells}
+    # drop points recorded by hand that the game data cannot supply -- gem,
+    # recall spell and NPC-summon destinations have no portal weenie
+    for cell, dx, dy, dz, label in extra_drops:
+        if cell not in cell_ids:
+            continue
+        px, py = T(dx, dy)
+        dr.ellipse([px - 9, py - 9, px + 9, py + 9], fill=MARKER['arrival'][0],
+                   outline=(255, 255, 255), width=2)
+        counts['arrival'] += 1
+        labels.append((px, py, 'D', MARKER['arrival'][0]))
     for ep in world.entry_portals(lb):
         dest = ep['dest']
         if dest is None or (dest[0] & 0xFFFF) not in cell_ids:
