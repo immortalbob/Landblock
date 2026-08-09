@@ -14,15 +14,19 @@ database -- use NullWorld() for geometry-only maps.
 
 Or from the command line: python -m landblock --help
 """
-from . import dat, geom, world, render, annotations   # submodules stay reachable
+from . import dat, geom, world, render, annotations, datwrite, transcode
 from .dat import Dat, OldDat, open_dat, Reader
 from .geom import Geometry, read_environment, read_environment_old
 from .world import World, NullWorld, coord_string, load_enums
 from .render import render as render_map, compute_floors, overlap_fraction, classify
 from .annotations import Annotations
+from .datwrite import write_old_dat, write_tod_dat
+from .transcode import envcell_to_tod, environment_to_tod, relocate_envcell
 
-__version__ = '1.2.2'
-__all__ = ['dat', 'geom', 'world', 'render', 'annotations', 'Annotations',
+__version__ = '1.7.0'
+__all__ = ['dat', 'geom', 'world', 'render', 'annotations', 'datwrite',
+           'transcode', 'Annotations', 'write_old_dat', 'write_tod_dat',
+           'envcell_to_tod', 'environment_to_tod', 'relocate_envcell',
            'Dat', 'OldDat', 'open_dat', 'Reader', 'Geometry',
            'read_environment', 'read_environment_old', 'World', 'NullWorld',
            'coord_string', 'load_enums', 'render_map', 'compute_floors',

@@ -209,6 +209,7 @@ class Geometry:
         self.portal = portal_dat
         self._env = {}
         self._index = None
+        self._unmapped = {}
         # environments a cell asked for that this portal.dat cannot supply.
         # Mismatched dat pairs are the usual cause -- a later cell.dat against
         # an earlier portal.dat references rooms that did not exist yet -- and
@@ -241,25 +242,18 @@ class Geometry:
         return self._index
 
     def unmapped(self, lb):
-        """Cells in this landblock whose room mesh this portal.dat lacks."""
-        n = 0
-        for cid in self.landblocks_with_interiors().get(lb, []):
-            r = Reader(self.cell.get(cid))
-            old = getattr(self.cell, 'era', 'tod') == 'pretod'
-            r.u32(); r.u32()
-            if not old:
-                r.u32()
-            nsurf = r.u8(); r.u8(); r.u16()
-            r.skip(2 * nsurf)
-            if old:
-                r.align()
-            if (0x0D000000 | r.u16()) not in self.portal.files:
-                n += 1
-        return n
+        """Cells in this landblock whose room mesh this portal.dat lacks.
+
+        Recorded by load(), so asking after loading costs nothing.
+        """
+        if lb not in self._unmapped:
+            self.load(lb)
+        return self._unmapped[lb]
 
     def load(self, lb):
         """Return list of EnvCellRec with world-space (landblock-space) floors."""
         old = getattr(self.cell, 'era', 'tod') == 'pretod'
+        gap = 0
         out = []
         for cid in sorted(self.landblocks_with_interiors().get(lb, [])):
             r = Reader(self.cell.get(cid))
@@ -276,6 +270,8 @@ class Geometry:
             if old:
                 r.align()
             env_id = 0x0D000000 | r.u16()
+            if env_id not in self.portal.files:
+                gap += 1
             sidx = r.u16()
             origin = r.vec3()
             rot = r.quat()
@@ -300,6 +296,7 @@ class Geometry:
              rec.zmin, rec.zmax) = self._floors(env_id, sidx, origin, rot,
                                                {p[1] for p in portals})
             out.append(rec)
+        self._unmapped[lb] = gap
         return out
 
     def _floors(self, env_id, sidx, origin, rot, portal_polys=()):

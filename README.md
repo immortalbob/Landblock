@@ -7,6 +7,12 @@ loot list is derived from an ACE-World database.
 
 ![example](docs/example.png)
 
+The dat plumbing underneath grew into a toolkit of its own. It reads and
+writes both container generations, converts records from the original format
+to the retail one, compares two client eras to find what changed between
+them, and merges records into a full-size client dat. Those are documented
+under [Working with the dats directly](#working-with-the-dats-directly).
+
 Runs on any client era, all the way back to release. Both dat generations are
 read: the 2005 (Throne of Destiny) container used through end of retail, and
 the original 1999–2005 container — header at 0x12C, 12-byte directory
@@ -138,7 +144,14 @@ categories, access methods and notes are added to the header either way.
 --voids                  shade cells that appear to have no walkable floor
 --debug-cells            overlay every cell id: F = has floor, C = cap only
 --skip-existing          resume an interrupted batch
+--allow-mixed-era        permit a cell dat and portal dat from different
+                         container generations (see below)
 ```
+
+`--allow-mixed-era` exists for one honest case: cells converted from the
+original format to the retail one still name the same meshes, so a converted
+cell dat pairs correctly with the period portal it came from. Every other
+mismatch is a mistake, which is why it is refused by default.
 
 ---
 
@@ -246,10 +259,10 @@ keep every floor, and so do landblocks no world database covers.
 ## Using it as a library
 
 ```python
-from landblock import Dat, Geometry, World, render_map, load_enums
+from landblock import open_dat, Geometry, World, render_map, load_enums
 
 load_enums('landblock/enums.json')
-geom  = Geometry(Dat('client_cell_1.dat'), Dat('client_portal.dat'))
+geom  = Geometry(open_dat('client_cell_1.dat'), open_dat('client_portal.dat'))
 world = World('/path/to/ACE-World/Database')
 
 cells        = geom.load(0x01F5)
@@ -257,8 +270,145 @@ insts, links = world.instances(0x01F5)
 render_map(0x01F5, cells, insts, links, world, 'aerfalle.png')
 ```
 
-`Dat` alone is a usable reader for any AC dat file, and
-`geom.read_environment` parses `0x0D` meshes.
+`open_dat` alone is a usable reader for any AC dat file of either generation,
+and `read_environment` / `read_environment_old` parse `0x0D` meshes.
+
+---
+
+## Working with the dats directly
+
+Three command-line tools sit alongside the map generator. All of them read
+either container generation, and none of them ever writes to an input file.
+
+### Comparing two client eras
+
+```bash
+python3 dungeon_diff.py --old-cell cell.dat     --old-portal portal.dat \
+                        --new-cell client_cell_1.dat \
+                        --new-portal client_portal.dat \
+                        --kind dungeon --out changes.csv
+```
+
+Reports every landblock the old dats have that the new ones dropped or
+changed, with an update percentage. Landblocks only the new dats have are
+ignored — the question is what happened to the old content.
+
+This cannot be a byte diff. Between Dark Majesty and end of retail every
+surface id in the game was renumbered, so an untouched cell still stores
+different numbers and a naive comparison calls 100% of dungeons "updated".
+The tool therefore learns the renumbering from the data first: it collects
+every (old surface, new surface) pair across all shared cells, and where an
+old id maps overwhelmingly to one new id that is renumbering rather than
+retexturing. Only deviations count. On a 2004-to-retail run it learns 660
+ids, 625 of them unambiguous.
+
+Two percentages come out. `update_pct` counts any difference; `struct_pct`
+discounts texture-only changes, which separates "this dungeon was rebuilt"
+from "this dungeon was repainted" — on one landblock those read 99.3% and
+54.9%. Room meshes are compared separately, in `meshes_changed`, because a
+dungeon whose cells are identical can still have been rebuilt underneath.
+
+`--kind dungeon` keeps landblocks with no outside connection at all: no cell
+flagged visible from outdoors and no portal leading outdoors. `building` and
+`cave` are told apart by whether the LandBlockInfo registers a building, which
+is a weak test — a cave mouth is registered the same way a house is — so treat
+that split as provisional.
+
+`old_lbi_cells` reading 0 against a non-zero `old_cells` marks orphaned
+records: cells left behind when content was retired, which the LandBlockInfo
+no longer counts. Comparing against those is meaningless, and they are
+flagged so you can filter them out.
+
+### Merging records into a client dat
+
+```bash
+# prove the machinery is lossless on your own files first
+python3 dat_merge.py --verify client_portal.dat
+
+python3 dat_merge.py --base client_portal.dat --patch mypatch.dat \
+                     --out client_portal.new.dat
+```
+
+A patch is a few hundred KB but the file it goes into is not — an
+end-of-retail portal.dat is 927 MB across 79,694 records. Records are
+therefore written straight through: walk the source, copy each block chain to
+the output as it is read, and keep only `(id, offset, size)` per record. The
+B-tree is bulk-loaded over those offsets at the end and its nodes appended as
+ordinary blocks. Peak memory is the index alone — 64 MB for that 927 MB
+portal, about 350 MB for a retail cell dat with 805,348 records.
+
+`--verify` round-trips a dat through the writer and checks the result is
+byte-identical, that every id is reachable by the ordered descent a client's
+`Lookup` performs, and that an absent key is correctly not found. That last
+part matters: a tree can enumerate correctly and still be unnavigable.
+
+**A patch record whose id already exists is an error, not an overwrite.**
+Silently replacing a record destroys whatever was there — someone else's
+dungeon, a shared mesh — and the failure would only show up in game.
+`--allow-empty-lbi` permits one narrow exception: replacing a LandBlockInfo
+that declares zero cells, which is the registration a restored dungeon needs
+and currently says "nothing here". `--overwrite` disables the guard entirely
+and is rarely what you want.
+
+Note that the output is compacted as a side effect of being rebuilt rather
+than edited in place: records land contiguously, the B-tree is packed near
+capacity instead of half-full, and the free-block list is not carried over.
+A retail cell dat comes out 14 MB smaller while holding 24,000 more records.
+Every field that constitutes the dat's identity — data set and subset, master
+map id, engine and game pack versions, the version stamp — is preserved
+verbatim; only size, B-tree root and the free-list fields change, because
+those describe the physical file.
+
+### Converting records between eras
+
+`landblock/transcode.py` re-encodes original-format records into the retail
+layout. The two generations carry the same fields in the same order; retail
+repeats the cell id up front and omits the 4-byte padding the original format
+inserts after the surface list, the portal list, the stab list, the statics,
+every polygon, and the polygon-index lists inside BSP nodes. So converting a
+mesh is a walk that copies each field through and drops padding at those
+points — the BSP trees are traversed, never interpreted.
+
+```python
+from landblock import open_dat, envcell_to_tod, environment_to_tod
+from landblock.transcode import verify_envcell, verify_environment
+
+src = open_dat('cell.dat')                      # original era
+out = envcell_to_tod(src.get(0x02B90100))
+verify_envcell(src.get(0x02B90100), out)        # raises unless every field agrees
+```
+
+`relocate_envcell` moves a cell to another landblock. Only the embedded cell
+id carries the landblock; portal links and stab entries are 16-bit and
+landblock-relative, so that is a four-byte edit per cell.
+
+Textures need real work rather than a copy, because retail restructured the
+chain. Originally a Surface pointed straight at an indexed image plus a
+palette; retail inserts a level — Surface → SurfaceTexture → RenderSurface —
+and RenderSurface holds plain D3D-format pixels with no palette at all.
+`imgtex_to_rgb`, `render_surface_record`, `surface_texture_record` and
+`surface_to_tod` do that conversion. `gfxobj_to_tod` handles static props,
+whose internal counts switch to retail's variable-length integer encoding.
+
+Verified across every dat tested: 546,064 cells and 665 meshes convert and
+re-verify field-for-field, including UV runs, per-polygon surface indices,
+stippling, cull mode and full BSP trees.
+
+### Restoring content
+
+`build_restore.py` assembles a patch that puts dungeons from an older client
+into a newer one. It is the least general of the tools — the tier lists near
+the top are specific to one analysis and you will want `--landblocks` instead
+— but the placement rule is the point:
+
+> A dungeon keeps its original landblock only where that landblock is empty
+> in the target. Anything whose slot is occupied moves to a free landblock,
+> so nothing already in the client is displaced.
+
+`--avoid` takes landblocks another patch has already claimed, so two patches
+built independently never collide. `--new-portal-index` accepts a text file
+of hex ids instead of the portal itself, which lets the build run somewhere
+the real portal.dat is not.
 
 ---
 
@@ -266,13 +416,23 @@ render_map(0x01F5, cells, insts, links, world, 'aerfalle.png')
 
 | | |
 |---|---|
+| `tests/` | ToD container, geometry and transcode regression tests |
 | `landblock/dat.py` | dat containers, both generations: header, B-tree directory, block chains |
 | `landblock/geom.py` | EnvCells, `0x0D` meshes, floors, walls, ramps — ToD and original encodings |
 | `landblock/world.py` | weenie index and landblock instances, base + patches |
 | `landblock/annotations.py` | optional community spreadsheet loader |
 | `landblock/render.py` | floor grouping, layout and drawing |
+| `landblock/datwrite.py` | dat writers for both generations, B-tree bulk load |
+| `landblock/transcode.py` | original-era records re-encoded to the retail layout |
 | `landblock/__main__.py` | command line |
 | `landblock/enums.json` | WeenieType and CreatureType, exported from ACE |
+| `dungeon_diff.py` | compare two client eras, standalone |
+| `dat_merge.py` | streaming merge and round-trip verification, standalone |
+| `build_restore.py` | assemble a restoration patch |
+
+`dungeon_diff.py` and `dat_merge.py` are self-contained — they carry their own
+dat reader and need nothing but Python, so they can be dropped next to a
+client install on their own.
 
 ---
 
@@ -289,7 +449,11 @@ for i in sorted(x for x in d.files if 0x0D000000 <= x <= 0x0D00FFFF):
     parse(d.get(i))                 # raises on any mismatch
 ```
 
-End-of-retail passes 772 of 772; December 2000 passes 478 of 478.
+End-of-retail passes 772 of 772; December 2000 passes 478 of 478; September
+2004 passes 665 of 665.
+
+`tests/` covers the retail decoders without a retail client, by building
+valid ToD-format containers and meshes in memory and reading them back.
 
 ---
 
@@ -304,6 +468,18 @@ End-of-retail passes 772 of 772; December 2000 passes 478 of 478.
 * `HAZARD_DAMAGE` in `render.py` decides whether a hotspot is a hazard or
   ambient scenery. At the default of 10, end-of-retail "Hot Air" (12 and 20
   damage) paints as a fire hazard rather than the grate it looks like in game.
+* Everything the writing and converting side does is verified against the
+  format and against real client data — never against a running client. No
+  output of `dat_merge.py` has been loaded by the game.
+* `dat_merge.py` rebuilds rather than inserting in place, so the output is
+  compacted and its block layout differs from the input. Contents are
+  identical; byte-for-byte file comparison between the two is not meaningful.
+* Retail's `RenderSurface` header carries a field whose meaning is unknown.
+  Converted textures use the value most common for their size and format; it
+  does not affect how the pixels are read.
+* Telling caves from buildings in `dungeon_diff.py` rests on whether the
+  LandBlockInfo registers a building, and a cave mouth registers the same way
+  a house does. Dungeons are separated reliably; that split is not.
 
 ## Credits
 

@@ -273,6 +273,9 @@ def main():
                     help='only landblocks with no physical surface entrance: '
                          'no outdoor object placements and no housing, i.e. '
                          'reachable only by portal or transport spell')
+    ap.add_argument('--allow-mixed-era', action='store_true',
+                    help='permit a cell dat and portal dat from different '
+                         'container generations')
     ap.add_argument('--skip-existing', action='store_true',
                     help='resume a batch run without redoing finished maps')
     args = ap.parse_args()
@@ -285,9 +288,15 @@ def main():
     t0 = time.time()
     cell_dat = open_dat(args.cell)
     portal_dat = open_dat(args.portal)
-    if cell_dat.era != portal_dat.era:
-        ap.error('cell and portal dats are from different eras (%s vs %s)'
+    if cell_dat.era != portal_dat.era and not args.allow_mixed_era:
+        ap.error('cell and portal dats are from different eras (%s vs %s). '
+                 'Pass --allow-mixed-era if that is deliberate -- it is valid '
+                 'when cells have been converted between eras but the meshes '
+                 'they name are unchanged.'
                  % (cell_dat.era, portal_dat.era))
+    if cell_dat.era != portal_dat.era:
+        print('mixing a %s cell dat with a %s portal dat, as requested'
+              % (cell_dat.era, portal_dat.era))
     if cell_dat.era == 'pretod':
         print('original-era (pre-ToD) dats detected')
     geom = Geometry(cell_dat, portal_dat)
@@ -325,7 +334,7 @@ def main():
             continue
         # a cell whose room mesh is absent from this portal.dat draws as
         # nothing at all, so say so on the map rather than leaving a hole
-        gap = geom.unmapped(lb)
+        gap = geom.unmapped(lb)          # recorded by the load above; free
         if gap:
             incomplete.append((lb, gap, len(cells)))
         if not any(c.floors for c in cells):
