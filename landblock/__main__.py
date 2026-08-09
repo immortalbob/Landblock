@@ -18,7 +18,7 @@ import time
 
 from . import world as acworld
 from . import render as acrender
-from .dat import Dat
+from .dat import open_dat
 from .geom import Geometry
 
 
@@ -217,7 +217,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--cell', required=True)
     ap.add_argument('--portal', required=True)
-    ap.add_argument('--world', required=True, help='ACE-World .../Database directory')
+    ap.add_argument('--world', default=None,
+                    help='ACE-World .../Database directory. Optional: without '
+                         'it maps are geometry only (no objects, names or '
+                         'entry data) and files are named by landblock id -- '
+                         'the only choice for original-era dats, which have '
+                         'no matching world database')
     ap.add_argument('--out', default='maps')
     ap.add_argument('--landblock', action='append', default=[],
                     help='hex landblock id, repeatable')
@@ -272,10 +277,25 @@ def main():
                     help='resume a batch run without redoing finished maps')
     args = ap.parse_args()
 
+    if args.dungeons_only and not args.world:
+        ap.error('--dungeons-only needs --world: object data is what tells a '
+                 'dungeon from a cave, building or house')
+
     acworld.load_enums(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'enums.json'))
     t0 = time.time()
-    geom = Geometry(Dat(args.cell), Dat(args.portal))
-    world = acworld.World(args.world, cache=args.cache, patch_core=args.patches)
+    cell_dat = open_dat(args.cell)
+    portal_dat = open_dat(args.portal)
+    if cell_dat.era != portal_dat.era:
+        ap.error('cell and portal dats are from different eras (%s vs %s)'
+                 % (cell_dat.era, portal_dat.era))
+    if cell_dat.era == 'pretod':
+        print('original-era (pre-ToD) dats detected')
+    geom = Geometry(cell_dat, portal_dat)
+    if args.world:
+        world = acworld.World(args.world, cache=args.cache, patch_core=args.patches)
+    else:
+        world = acworld.NullWorld()
+        print('no world database: geometry-only maps, named by landblock id')
     ann = None
     if args.annotations:
         from .annotations import Annotations
@@ -296,19 +316,29 @@ def main():
     done = 0
     skipped = []
     manifest = []
+    incomplete = []
     t0 = time.time()
     for lb in todo:
         cells = geom.load(lb)
         if not cells:
             skipped.append((lb, 'no interior cells'))
             continue
+        # a cell whose room mesh is absent from this portal.dat draws as
+        # nothing at all, so say so on the map rather than leaving a hole
+        gap = geom.unmapped(lb)
+        if gap:
+            incomplete.append((lb, gap, len(cells)))
         if not any(c.floors for c in cells):
             # sub-cells holding only prop collision boxes (poles, ladders,
             # water planes) -- not a walkable interior
-            skipped.append((lb, 'no floor geometry'))
+            skipped.append((lb, 'no room meshes in this portal.dat'
+                                if gap == len(cells) else 'no floor geometry'))
             continue
         insts, links = world.instances(lb)
         sub, lines = header_for(world, lb, geom, cells, insts)
+        if gap:
+            lines = lines + ['INCOMPLETE: %d of %d cells not drawn -- their room '
+                             'meshes are absent from this portal.dat' % (gap, len(cells))]
         name = world.dungeon_name(lb)
         drops = ()
         if ann is not None:
@@ -405,6 +435,13 @@ def main():
             w.writerows(manifest)
         _write_html(args.out, manifest)
     print('rendered %d maps in %.1fs -> %s' % (done, time.time() - t0, args.out))
+    if geom.missing_env:
+        blocked = sum(1 for lb, g, n in incomplete if g == n)
+        print('MESH GAP: this portal.dat is missing %d environments the cell dat '
+              'references' % len(geom.missing_env))
+        print('   %d landblocks lost every cell, %d lost some -- the dats are '
+              'probably from different patches'
+              % (blocked, len(incomplete) - blocked))
     if skipped:
         print('skipped %d landblocks:' % len(skipped))
         for lb, why in skipped[:20]:

@@ -1,4 +1,15 @@
-"""Dungeon geometry: EnvCells from cell.dat and 0x0D meshes from portal.dat."""
+"""Dungeon geometry: EnvCells from cell.dat and 0x0D meshes from portal.dat.
+
+Both dat generations are understood. The 2005+ ("ToD") structures were
+transcribed from ACEmulator's ACE.DatLoader; the original 1999-2005 ones from
+the PhatSDK PRE_TOD branches (EnvCell.cpp, Environment.cpp, Polygon.cpp,
+Vertex.cpp, BSPData.cpp). They differ only in the small print:
+
+* an original EnvCell opens {flags, id} where ToD has {id, flags, id};
+* original polygons carry their own id, where ToD keys them externally;
+* the original encodings pad to 4-byte alignment after surface lists,
+  polygons, stab lists and the polygon-index lists inside BSP nodes.
+"""
 import math
 from .dat import Reader
 
@@ -6,33 +17,39 @@ from .dat import Reader
 # We do not need the BSP trees, but we must consume them byte-exactly to reach
 # the next CellStruct in an environment file.
 
-def _skip_bsp(r, kind):
+def _skip_bsp(r, kind, old=False):
     tag = r.b[r.p:r.p + 4][::-1].decode('latin-1')
     if tag == 'LEAF':
         r.skip(4); r.i32()
         if kind == 'physics':
             r.i32(); r.skip(16)
             r.skip(2 * r.u32())
+            if old:
+                r.align()
         return
     if tag == 'PORT':
         r.skip(4); r.skip(16)
-        _skip_bsp(r, kind); _skip_bsp(r, kind)
+        _skip_bsp(r, kind, old); _skip_bsp(r, kind, old)
         if kind == 'drawing':
             r.skip(16)
             npoly = r.u32(); nport = r.u32()
             r.skip(2 * npoly); r.skip(4 * nport)
+            if old:
+                r.align()
         return
     r.skip(4); r.skip(16)
     if tag in ('BPnn', 'BPIn', 'BpIN', 'BpnN'):
-        _skip_bsp(r, kind)
+        _skip_bsp(r, kind, old)
     elif tag in ('BPIN', 'BPnN'):
-        _skip_bsp(r, kind); _skip_bsp(r, kind)
+        _skip_bsp(r, kind, old); _skip_bsp(r, kind, old)
     if kind == 'cell':
         return
     r.skip(16)
     if kind == 'physics':
         return
     r.skip(2 * r.u32())
+    if old:
+        r.align()
 
 
 def _read_polygon(r):
@@ -89,6 +106,75 @@ def read_environment(buf):
     return cells
 
 
+# ------------------------------------------------- original (pre-ToD) meshes
+
+def _read_polygon_old(r):
+    """CPolygon::UnPack, PRE_TOD: the id travels inside, padded to 4 bytes."""
+    pid = r.i16()
+    npts = r.u8()
+    stip = r.u8()
+    sides = r.i32()
+    r.i16(); r.i16()                       # pos / neg surface
+    vids = [r.i16() for _ in range(npts)]
+    if not (stip & 0x04):
+        r.skip(npts)                       # pos uv indices
+    if sides == 2 and not (stip & 0x08):
+        r.skip(npts)                       # neg uv indices
+    r.align()
+    return pid, vids
+
+
+def _read_cellstruct_old(r):
+    key = r.u32()                          # CCellStruct reads its own id
+    npoly = r.u32(); nphys = r.u32(); nport = r.u32()
+    vtype = r.u32()
+    nvert = r.u32()
+    verts = {}
+    if vtype == 1:
+        for _ in range(nvert):
+            k = r.u16()
+            nuv = r.u16()
+            ox, oy, oz = r.vec3()
+            nx, ny, nz = r.vec3()
+            r.skip(8 * nuv)
+            verts[k] = (ox, oy, oz, nx, ny, nz)
+    elif vtype in (2, 3):                  # raw 32-byte vertices
+        for i in range(nvert):
+            ox, oy, oz = r.vec3()
+            nx, ny, nz = r.vec3()
+            r.skip(8)
+            verts[i] = (ox, oy, oz, nx, ny, nz)
+    else:
+        raise ValueError('vertex type %d' % vtype)
+    polys = {}
+    for _ in range(npoly):
+        pid, vids = _read_polygon_old(r)
+        polys[pid] = vids
+    r.skip(2 * nport)
+    r.align()
+    _skip_bsp(r, 'cell', old=True)
+    for _ in range(nphys):
+        _read_polygon_old(r)
+    _skip_bsp(r, 'physics', old=True)
+    if r.u32() != 0:
+        _skip_bsp(r, 'drawing', old=True)
+    r.align()
+    return key, (verts, polys)
+
+
+def read_environment_old(buf):
+    r = Reader(buf)
+    r.u32()
+    n = r.u32()
+    cells = {}
+    for _ in range(n):
+        key, cs = _read_cellstruct_old(r)
+        cells[key] = cs
+    if r.p != len(buf):
+        raise ValueError('environment parse length mismatch (%d/%d)' % (r.p, len(buf)))
+    return cells
+
+
 # ---------------------------------------------------------------------- cells
 FLAG_SEEN_OUTSIDE = 0x01
 FLAG_HAS_STATIC = 0x02
@@ -123,13 +209,25 @@ class Geometry:
         self.portal = portal_dat
         self._env = {}
         self._index = None
+        # environments a cell asked for that this portal.dat cannot supply.
+        # Mismatched dat pairs are the usual cause -- a later cell.dat against
+        # an earlier portal.dat references rooms that did not exist yet -- and
+        # the cells using them cannot be drawn at all, so this is counted and
+        # reported rather than silently leaving holes in the plan.
+        self.missing_env = set()
 
     def env(self, eid):
         if eid not in self._env:
-            try:
-                self._env[eid] = read_environment(self.portal.get(eid))
-            except Exception:
+            parse = (read_environment_old if getattr(self.portal, 'era', 'tod') == 'pretod'
+                     else read_environment)
+            if eid not in self.portal.files:
+                self.missing_env.add(eid)
                 self._env[eid] = {}
+            else:
+                try:
+                    self._env[eid] = parse(self.portal.get(eid))
+                except Exception:
+                    self._env[eid] = {}
         return self._env[eid]
 
     def landblocks_with_interiors(self):
@@ -142,22 +240,49 @@ class Geometry:
             self._index = idx
         return self._index
 
+    def unmapped(self, lb):
+        """Cells in this landblock whose room mesh this portal.dat lacks."""
+        n = 0
+        for cid in self.landblocks_with_interiors().get(lb, []):
+            r = Reader(self.cell.get(cid))
+            old = getattr(self.cell, 'era', 'tod') == 'pretod'
+            r.u32(); r.u32()
+            if not old:
+                r.u32()
+            nsurf = r.u8(); r.u8(); r.u16()
+            r.skip(2 * nsurf)
+            if old:
+                r.align()
+            if (0x0D000000 | r.u16()) not in self.portal.files:
+                n += 1
+        return n
+
     def load(self, lb):
         """Return list of EnvCellRec with world-space (landblock-space) floors."""
+        old = getattr(self.cell, 'era', 'tod') == 'pretod'
         out = []
         for cid in sorted(self.landblocks_with_interiors().get(lb, [])):
             r = Reader(self.cell.get(cid))
-            r.u32()
-            flags = r.u32()
-            r.u32()
+            if old:
+                # CEnvCell::UnPack, PRE_TOD: {flags, id}, no leading id copy
+                flags = r.u32()
+                r.u32()
+            else:
+                r.u32()
+                flags = r.u32()
+                r.u32()
             nsurf = r.u8(); nport = r.u8(); nvis = r.u16()
             r.skip(2 * nsurf)
+            if old:
+                r.align()
             env_id = 0x0D000000 | r.u16()
             sidx = r.u16()
             origin = r.vec3()
             rot = r.quat()
             portals = [(r.u16(), r.u16(), r.u16(), r.u16()) for _ in range(nport)]
             r.skip(2 * nvis)
+            if old:
+                r.align()
             statics = []
             if flags & FLAG_HAS_STATIC:
                 for _ in range(r.u32()):

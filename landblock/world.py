@@ -46,6 +46,8 @@ def _unq(v):
 
 
 class World:
+    source_desc = 'objects: ACE-World'
+
     def __init__(self, sql_root, cache=None, patch_core=None):
         """sql_root is an ACE-World .../Database directory.
 
@@ -290,6 +292,34 @@ class World:
     @staticmethod
     def _global(lb, x, y):
         return (((lb >> 8) & 0xFF) * 192.0 + x, (lb & 0xFF) * 192.0 + y)
+
+
+class NullWorld:
+    """Stand-in when no ACE world database is available.
+
+    Original-era dats have no matching object database, so the maps are
+    geometry only: floors, walls, ramps and cell portals, but no spawns,
+    chests, names or entry chains. Every lookup answers 'nothing known'.
+    """
+    source_desc = 'geometry only, no object data'
+    weenies = {}
+    portal_dests = {}
+    placements = {}
+
+    def instances(self, lb):
+        return [], {}
+
+    def name(self, wcid):
+        return 'wcid %d' % wcid
+
+    def dungeon_name(self, lb):
+        return None
+
+    def entry_portals(self, lb):
+        return []
+
+    def nearest_lifestone(self, lb, cell, x, y):
+        return None
 
 
 def map_coords_global(gx, gy):

@@ -1,14 +1,40 @@
 """Minimal reader for Asheron's Call .dat files (portal / cell / language).
 
-Format transcribed from ACEmulator's ACE.DatLoader. Works on 2005-era through
-end-of-retail dats -- the container format did not change.
+Two container generations, autodetected by open_dat():
+
+* `Dat` -- the 2005 (Throne of Destiny) container, used through end of
+  retail. Header at 0x140, 24-byte directory entries. Transcribed from
+  ACEmulator's ACE.DatLoader.
+* `OldDat` -- the original 1999-2005 container. Header at 0x12C, 12-byte
+  directory entries {id, offset, size} with no compression flags or dates.
+  Transcribed from the PhatSDK PRE_TOD branches (DATDisk.h/.cpp).
+
+Both expose the same surface: .files, .get(id), .ids_in(lo, hi), .era.
 """
 import struct
 
 HEADER_OFFSET = 0x140
+OLD_HEADER_OFFSET = 0x12C
+MAGIC = 0x5442                 # 'BT'
+
+
+def open_dat(path):
+    """Open either dat generation, sniffing the header magic."""
+    with open(path, 'rb') as f:
+        f.seek(OLD_HEADER_OFFSET)
+        old_magic = struct.unpack('<I', f.read(4))[0]
+        f.seek(HEADER_OFFSET)
+        new_magic = struct.unpack('<I', f.read(4))[0]
+    if old_magic == MAGIC:
+        return OldDat(path)
+    if new_magic == MAGIC:
+        return Dat(path)
+    raise ValueError('%s: no dat header magic at 0x12C or 0x140' % path)
 
 
 class Dat:
+    era = 'tod'
+
     def __init__(self, path):
         self.path = path
         self.f = open(path, 'rb')
@@ -56,6 +82,72 @@ class Dat:
 
     def get(self, oid):
         off, size, _d, _i = self.files[oid]
+        return self._read_blocks(off, size)
+
+    def ids_in(self, lo, hi):
+        return [i for i in self.files if lo <= i <= hi]
+
+
+class OldDat:
+    """The original (pre-Throne of Destiny) dat container, 1999-2005.
+
+    Header at 0x12C: magic 'BT', block size, file size, iteration, free
+    head/tail/count, B-tree root. Directory nodes hold 62 branch offsets, an
+    entry count, then up to 61 entries of {object id, file offset, size}.
+    A leaf is a node whose first branch offset is zero. File payloads chain
+    through blocks exactly as in the later container; a next-block pointer
+    with the high bit set marks a free block and means the chain is corrupt.
+    """
+    era = 'pretod'
+
+    DIR_SIZE = (4 * 0x3E) + 4 + (4 * 3 * 0x3D)
+
+    def __init__(self, path):
+        self.path = path
+        self.f = open(path, 'rb')
+        self.f.seek(OLD_HEADER_OFFSET)
+        (self.file_type, self.block_size, self.file_size, self.iteration,
+         self.free_head, self.free_tail, self.free_count,
+         self.btree) = struct.unpack('<8I', self.f.read(32))
+        if self.file_type != MAGIC:
+            raise ValueError('%s: bad old-dat magic %08X' % (path, self.file_type))
+        self.files = {}
+        self._read_dir(self.btree)
+
+    def _read_blocks(self, offset, size):
+        buf = bytearray()
+        f = self.f
+        remaining = size
+        while offset and remaining > 0:
+            if offset & 0x80000000:
+                raise ValueError('%s: free block in chain' % self.path)
+            f.seek(offset)
+            offset = struct.unpack('<I', f.read(4))[0]
+            take = min(self.block_size - 4, remaining)
+            buf += f.read(take)
+            remaining -= take
+        if remaining:
+            raise ValueError('%s: block chain ended %d bytes short'
+                             % (self.path, remaining))
+        return bytes(buf)
+
+    def _read_dir(self, offset):
+        data = self._read_blocks(offset, self.DIR_SIZE)
+        branches = struct.unpack_from('<62I', data, 0)
+        count = struct.unpack_from('<I', data, 62 * 4)[0]
+        if count > 61:
+            raise ValueError('%s: directory node with %d entries'
+                             % (self.path, count))
+        base = 62 * 4 + 4
+        for i in range(count):
+            oid, foff, fsize = struct.unpack_from('<3I', data, base + i * 12)
+            self.files[oid] = (foff, fsize)
+        if branches[0]:
+            for i in range(count + 1):
+                self._read_dir(branches[i])
+
+    def get(self, oid):
+        off, size = self.files[oid]
         return self._read_blocks(off, size)
 
     def ids_in(self, lo, hi):

@@ -7,9 +7,18 @@ loot list is derived from an ACE-World database.
 
 ![example](docs/example.png)
 
-Runs on any client era. The dat formats did not change between 2005 and end of
-retail, and the parsers are strict — they raise rather than guess — so a format
-drift would surface immediately instead of quietly producing wrong maps.
+Runs on any client era, all the way back to release. Both dat generations are
+read: the 2005 (Throne of Destiny) container used through end of retail, and
+the original 1999–2005 container — header at 0x12C, 12-byte directory
+entries, and cell/mesh records that differ in the small print (field order,
+embedded ids, 4-byte padding), transcribed from the PhatSDK `PRE_TOD`
+branches. `open_dat()` autodetects the generation. The parsers are strict —
+they raise rather than guess — so a format drift would surface immediately
+instead of quietly producing wrong maps. Both original-era clients tested
+parse byte-exact end to end: December 2000 gives 478 of 478 environment
+meshes and 115,550 of 115,550 interior cells, September 2004 (the last
+Dark Majesty build before the format change) 665 of 665 and 408,047 of
+408,047.
 
 ---
 
@@ -36,13 +45,43 @@ python -m landblock --cell ... --portal ... --world ... \
                     --out maps --landblock 01F5
 ```
 
+### Original-era dats (maps only)
+
+`--world` is optional. Without it the maps are geometry only — floors,
+walls, ramps and level separation, but no spawns, names, chests or entry
+chains — and each file is named by its 4-character landblock id
+(`01A9.png`). That is the only mode that makes sense for original-era dats:
+no object database from that era survives, and dungeon names drifted as
+content moved over the years, so nothing modern can be trusted to label
+them.
+
+```bash
+python -m landblock --cell cell.dat --portal portal.dat \
+                    --out maps2000 --all --min-cells 1
+```
+
+A December 2000 cell dat holds 992 landblocks with interiors; a September
+2004 one holds 2,656. Everything with cells is rendered — with no object
+data there is no way to tell a dungeon from a cave or a building interior,
+so nothing is filtered (`--dungeons-only` requires `--world` for the same
+reason).
+
+**Use a matching pair.** A cell dat names its rooms by id and the portal dat
+supplies the mesh, so a later cell against an earlier portal asks for rooms
+that did not exist yet. The 2004 cell references 638 environments; a 2000
+portal has 473 of them, which silently costs 68,162 cells and blanks 670
+landblocks outright. Any cell whose mesh is absent is counted, stamped on
+the map as `INCOMPLETE: n of m cells not drawn`, and summarised at the end
+of the run, so a mismatched pair announces itself rather than quietly
+producing maps with rooms missing.
+
 ### What you need
 
 | Input | Where it comes from | Required |
 |---|---|---|
-| `client_cell_1.dat` | your AC client install | yes — dungeon geometry |
-| `client_portal.dat` | your AC client install | yes — room meshes, terrain palette |
-| ACE-World `Database/` | github.com/ACEmulator/ACE-World | yes — every object on the map |
+| `client_cell_1.dat` / `cell.dat` | your AC client install (any era) | yes — dungeon geometry |
+| `client_portal.dat` / `portal.dat` | your AC client install (same era) | yes — room meshes, terrain palette |
+| ACE-World `Database/` | github.com/ACEmulator/ACE-World | no — omit for geometry-only maps (original-era dats have no world database) |
 | ACE-World patches | the matching patches repo | optional, strongly recommended |
 | `Landblocks.xlsx` | the community landblock spreadsheet | optional, `--annotations` |
 
@@ -195,6 +234,13 @@ footprint of other floors is a roof or an empty storey, and drawing it just
 buries what it covers. Those are dropped before compositing; `--keep-shells`
 disables that.
 
+"Nothing on it" is a claim about object data, so the test only runs where
+there is object data to make it. Without a world database every floor looks
+empty and the rule would delete real storeys rather than shells — on the
+February 2001 cell dat that silently cost 889 cells across 19 landblocks,
+including five of the seven floors of `02D7`. Geometry-only runs therefore
+keep every floor, and so do landblocks no world database covers.
+
 ---
 
 ## Using it as a library
@@ -220,8 +266,8 @@ render_map(0x01F5, cells, insts, links, world, 'aerfalle.png')
 
 | | |
 |---|---|
-| `landblock/dat.py` | dat container: header, B-tree directory, block chains |
-| `landblock/geom.py` | EnvCells, `0x0D` meshes, floors, walls, ramps |
+| `landblock/dat.py` | dat containers, both generations: header, B-tree directory, block chains |
+| `landblock/geom.py` | EnvCells, `0x0D` meshes, floors, walls, ramps — ToD and original encodings |
 | `landblock/world.py` | weenie index and landblock instances, base + patches |
 | `landblock/annotations.py` | optional community spreadsheet loader |
 | `landblock/render.py` | floor grouping, layout and drawing |
@@ -236,13 +282,14 @@ The mesh parser raises unless every environment file consumes to the exact
 byte, which makes it a usable smoke test:
 
 ```python
-from landblock import Dat, read_environment
-d = Dat('client_portal.dat')
+from landblock import open_dat, read_environment, read_environment_old
+d = open_dat('client_portal.dat')
+parse = read_environment_old if d.era == 'pretod' else read_environment
 for i in sorted(x for x in d.files if 0x0D000000 <= x <= 0x0D00FFFF):
-    read_environment(d.get(i))      # raises on any mismatch
+    parse(d.get(i))                 # raises on any mismatch
 ```
 
-End-of-retail passes 772 of 772.
+End-of-retail passes 772 of 772; December 2000 passes 478 of 478.
 
 ---
 
@@ -265,6 +312,9 @@ Object placements come from the ACEmulator ACE-World database. The optional
 annotations come from the community Landblocks spreadsheet compiled after
 retail by Immortalbob, Beale, Sylence, Justin, Howard (Oberon), Proximal,
 High-Voltage, Cpl Brown, Zarto and Crimson Mage, with thanks to OptimShi and
-Pea. Formats were
-transcribed from ACEmulator's `ACE.DatLoader`. Layout conventions are modelled
+Pea. The 2005+ formats were
+transcribed from ACEmulator's `ACE.DatLoader`; the original 1999–2005 formats
+from the `PRE_TOD` branches of the PhatSDK as preserved in the ClassicDereth
+project (github.com/bDekaru/ClassicDereth), descended from Pea's phatac.
+Layout conventions are modelled
 on the hand-drawn maps of the Asheron's Call mapping community.

@@ -157,7 +157,15 @@ def drop_shell_floors(cells, insts, floor_of, res=1.0, cover=0.85):
     of other floors is a roof or an empty storey shell. Drawing it just buries
     whatever it covers, which is what makes a keep-over-a-hall unreadable.
     Returns the cells worth compositing.
+
+    "Nothing on it" is a claim about object data, so this needs object data to
+    make it. With none -- no world database, or a landblock no database covers
+    -- every floor looks empty and the test would delete real storeys instead
+    of shells, which is worse than a busy plan. Nothing is dropped in that
+    case.
     """
+    if not insts:
+        return cells, set()
     by_floor = collections.defaultdict(list)
     for c in cells:
         f = floor_of.get(c.cell_id & 0xFFFF)
@@ -886,8 +894,8 @@ def render(lb, cells, insts, links, world, path, style='dungeon',
         for line in (header_lines or []):
             need.append(pad_l + int(probe.textlength(line, font=_font(30))) + pad_r)
         need.append(120 + int(probe.textlength(
-            'geometry: client_cell_1.dat + portal.dat 0x0D meshes | objects: '
-            'ACE-World  |  landblock 0x0000', font=_font(20))))
+            'geometry: cell + portal dats (0x0D meshes) | %s  |  landblock 0x0000'
+            % getattr(world, 'source_desc', 'objects: ACE-World'), font=_font(20))))
         W = max(W, *need)
 
     def T(x, y):
@@ -1348,8 +1356,9 @@ def render(lb, cells, insts, links, world, path, style='dungeon',
     _scalebar(dr, W - 40, H - 74, scale, f_leg, st['text'])
     _north(dr, 60, 60, st['text'])
     dr.text((60, H - 32),
-            'geometry: client_cell_1.dat + portal.dat 0x0D meshes | objects: ACE-World  |  '
-            'landblock 0x%04X' % lb, fill=(120, 120, 130), font=_font(20))
+            'geometry: cell + portal dats (0x0D meshes) | %s  |  landblock 0x%04X'
+            % (getattr(world, 'source_desc', 'objects: ACE-World'), lb),
+            fill=(120, 120, 130), font=_font(20))
     canvas.save(path)
     return dict(cells=len(cells), levels=sorted(lm.levels), objects=len(insts),
                 ramps=len(lm.ramps), bridges=len(lm.bridges), counts=dict(counts))
