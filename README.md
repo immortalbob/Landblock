@@ -30,6 +30,11 @@ Dark Majesty build before the format change) 665 of 665 and 408,047 of
 
 ## Quick start
 
+Pillow and numpy are needed only for drawing maps. The dat tools —
+`dungeon_diff.py`, `dat_merge.py`, `build_restore.py` — use nothing but the
+standard library, so skip the install if you are only reading, comparing,
+converting or writing dats.
+
 ```bash
 pip install -r requirements.txt
 
@@ -456,6 +461,25 @@ the top are specific to one analysis and you will want `--landblocks` instead
 built independently never collide. `--new-portal-index` accepts a text file
 of hex ids instead of the portal itself, which lets the build run somewhere
 the real portal.dat is not.
+
+### Checking a restore actually landed
+
+```bash
+python3 dungeon_diff.py --verify-restore old_cell.dat patched_cell.dat myset/manifest.json
+```
+
+A plain diff cannot answer this, and reading one as though it could is the
+easiest way to conclude a good restore failed. Most dungeons are relocated,
+so the restored copy lives at a new landblock while the target's own version
+stays where it was — and a diff, which matches by landblock id, still reports
+the original slot as 100% changed. Correctly: that slot really did not change.
+
+The manifest records where each dungeon went, so this follows it, comparing
+each source landblock in the old dat against the landblock it actually landed
+on. Contents are compared by layout signature, which is decoded rather than
+byte-wise and therefore survives the era conversion. Missing, wrong size,
+structurally broken and different-in-content are all reported separately, and
+the exit status is non-zero if any dungeon fails.
 
 ---
 

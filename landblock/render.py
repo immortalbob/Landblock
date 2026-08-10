@@ -11,13 +11,44 @@ from .geom import slope_of
 
 FONT_DIR = '/usr/share/fonts/truetype/dejavu'
 
+# Pillow's default font is a small bitmap that ignores the requested size, so
+# a map drawn with it comes out with unreadable labels. Look for a real
+# scalable face in the usual places on each platform before settling for it.
+FONT_CANDIDATES = {
+    False: ('DejaVuSans.ttf', 'Arial.ttf', 'arial.ttf', 'segoeui.ttf',
+            'Helvetica.ttc', 'LiberationSans-Regular.ttf', 'Verdana.ttf'),
+    True: ('DejaVuSans-Bold.ttf', 'Arial Bold.ttf', 'arialbd.ttf',
+           'segoeuib.ttf', 'Helvetica.ttc', 'LiberationSans-Bold.ttf',
+           'verdanab.ttf'),
+}
+FONT_DIRS = (FONT_DIR, '/usr/share/fonts/truetype/liberation',
+             'C:\\Windows\\Fonts', '/Library/Fonts', '/System/Library/Fonts',
+             os.path.expanduser('~/.fonts'))
+_font_cache = {}
+
 
 def _font(size, bold=False):
-    name = 'DejaVuSans-Bold.ttf' if bold else 'DejaVuSans.ttf'
-    try:
-        return ImageFont.truetype(os.path.join(FONT_DIR, name), size)
-    except OSError:
-        return ImageFont.load_default()
+    """A scalable font at the requested size, whatever platform this is on."""
+    key = (size, bool(bold))
+    if key in _font_cache:
+        return _font_cache[key]
+    for name in FONT_CANDIDATES[bool(bold)]:
+        for d in FONT_DIRS:
+            try:
+                f = ImageFont.truetype(os.path.join(d, name), size)
+                _font_cache[key] = f
+                return f
+            except (OSError, IOError):
+                continue
+        try:                              # let Pillow search its own paths too
+            f = ImageFont.truetype(name, size)
+            _font_cache[key] = f
+            return f
+        except (OSError, IOError):
+            continue
+    f = ImageFont.load_default()
+    _font_cache[key] = f
+    return f
 
 
 STYLES = {

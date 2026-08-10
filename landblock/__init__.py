@@ -14,16 +14,42 @@ database -- use NullWorld() for geometry-only maps.
 
 Or from the command line: python -m landblock --help
 """
-from . import dat, geom, world, render, annotations, datwrite, transcode
+from . import dat, geom, world, annotations, datwrite, transcode
 from .dat import Dat, OldDat, open_dat, Reader
 from .geom import Geometry, read_environment, read_environment_old
 from .world import World, NullWorld, coord_string, load_enums
-from .render import render as render_map, compute_floors, overlap_fraction, classify
 from .annotations import Annotations
 from .datwrite import write_old_dat, write_tod_dat
 from .transcode import envcell_to_tod, environment_to_tod, relocate_envcell
 
-__version__ = '1.10.0'
+# Drawing needs Pillow and numpy; reading, converting and writing dats need
+# neither. Importing render here would make `pip install pillow numpy` a
+# prerequisite for tools that never draw anything, so it is loaded on first
+# use instead -- `from landblock import render_map` still works.
+_LAZY = {'render': None, 'render_map': ('render', 'render'),
+         'compute_floors': ('render', 'compute_floors'),
+         'overlap_fraction': ('render', 'overlap_fraction'),
+         'classify': ('render', 'classify')}
+
+
+def __getattr__(name):
+    if name not in _LAZY:
+        raise AttributeError('module %r has no attribute %r' % (__name__, name))
+    import importlib
+    mod = importlib.import_module('.render', __name__)
+    if _LAZY[name] is None:
+        globals()[name] = mod
+        return mod
+    value = getattr(mod, _LAZY[name][1])
+    globals()[name] = value
+    return value
+
+
+def __dir__():
+    return sorted(list(globals()) + list(_LAZY))
+
+
+__version__ = '1.11.0'
 __all__ = ['dat', 'geom', 'world', 'render', 'annotations', 'datwrite',
            'transcode', 'Annotations', 'write_old_dat', 'write_tod_dat',
            'envcell_to_tod', 'environment_to_tod', 'relocate_envcell',

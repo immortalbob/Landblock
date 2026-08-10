@@ -56,6 +56,7 @@ cell-based percentage.
 import argparse
 import collections
 import csv
+import json
 import os
 import struct
 import sys
@@ -641,6 +642,57 @@ def run_validate(path, quiet=False):
     return len(failures)
 
 
+def run_verify_restore(old_cell, new_cell, manifest_path, quiet=False):
+    """Confirm a restored dungeon in the patched dat matches where it came from.
+
+    A plain diff cannot answer this. Most dungeons are relocated -- the target
+    landblock was occupied, so the restored copy lives at a new id while the
+    target's own version stays where it was. Comparing by landblock id then
+    reports the original slot as still changed, which looks like a failure and
+    is not one.
+
+    The manifest records where each dungeon went, so this follows it: source
+    landblock in the old dat against target landblock in the patched one,
+    compared by layout signature, which is era-independent.
+    """
+    oc = Dat(old_cell)
+    nc = Dat(new_cell)
+    m = json.load(open(manifest_path))
+    oi = interiors(oc)
+    ni = interiors(nc)
+    good, bad = [], []
+    for p in m['placement']:
+        src, dst = int(p['source'], 16), int(p['target'], 16)
+        if src not in oi:
+            bad.append((p, 'source landblock is not in the old dat')); continue
+        if dst not in ni:
+            bad.append((p, 'nothing at the target landblock')); continue
+        want = live_cells(oc, src, oi[src])
+        got = sorted(i & 0xFFFF for i in ni[dst])
+        if len(want) != len(got):
+            bad.append((p, '%d cells expected, %d present' % (len(want), len(got))))
+            continue
+        problems = validate_landblock(nc, dst, got)
+        if problems:
+            bad.append((p, '; '.join(problems))); continue
+        if layout_signature(oc, src, want) != layout_signature(nc, dst, got):
+            bad.append((p, 'contents differ from the source')); continue
+        good.append(p)
+    if not quiet:
+        print('%s -> %s, following %s'
+              % (os.path.basename(old_cell), os.path.basename(new_cell),
+                 os.path.basename(manifest_path)))
+        print('   %d of %d restored dungeons are identical to their source'
+              % (len(good), len(m['placement'])))
+        moved = [p for p in good if p['source'] != p['target']]
+        if moved:
+            print('   %d of those were relocated, so their original landblock '
+                  'still holds the target\'s own version' % len(moved))
+        for p, why in bad:
+            print('      %s -> %s  %s' % (p['source'], p['target'], why))
+    return len(bad)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -653,6 +705,10 @@ def main():
                          'per distinct layout')
     ap.add_argument('--min-struct', type=float, default=100.0,
                     help='structural change floor for --dedupe (default 100)')
+    ap.add_argument('--verify-restore', nargs=3,
+                    metavar=('OLD_CELL', 'PATCHED_CELL', 'MANIFEST'),
+                    help='confirm every dungeon named in a build manifest '
+                         'arrived intact, following relocations')
     ap.add_argument('--old-cell')
     ap.add_argument('--new-cell')
     ap.add_argument('--old-portal')
@@ -674,6 +730,8 @@ def main():
     if args.dedupe:
         run_dedupe(args.dedupe[0], args.dedupe[1], args.min_struct)
         raise SystemExit(0)
+    if args.verify_restore:
+        raise SystemExit(1 if run_verify_restore(*args.verify_restore) else 0)
     if not (args.old_cell and args.new_cell):
         ap.error('need --old-cell and --new-cell, or --validate')
     compare(args)

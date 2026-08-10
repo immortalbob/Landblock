@@ -15,7 +15,6 @@ from landblock.transcode import (envcell_to_tod, environment_to_tod,
 
 CELL = os.environ.get('OLD_CELL', 'dats/cell_partial/CELL.DAT')
 PORTAL = os.environ.get('OLD_PORTAL', 'dats/portal/portal.dat')
-LB = int(os.environ.get('OLD_LB', '02B9'), 16)
 DST = int(os.environ.get('NEW_LB', '0114'), 16)
 
 if not (os.path.exists(CELL) and os.path.exists(PORTAL)):
@@ -25,9 +24,27 @@ if not (os.path.exists(CELL) and os.path.exists(PORTAL)):
 src_cell, src_portal = open_dat(CELL), open_dat(PORTAL)
 assert src_cell.era == 'pretod'
 
-ids = sorted(i for i in src_cell.files
-             if i >> 16 == LB and 0x0100 <= (i & 0xFFFF) < 0xFFFE)
-assert ids, 'landblock %04X has no interior cells' % LB
+
+def interiors_of(lb):
+    return sorted(i for i in src_cell.files
+                  if i >> 16 == lb and 0x0100 <= (i & 0xFFFF) < 0xFFFE)
+
+
+# Any interior will do, so rather than name one -- which ties the test to a
+# particular client -- take a mid-sized landblock this dat actually has.
+if os.environ.get('OLD_LB'):
+    LB = int(os.environ['OLD_LB'], 16)
+    ids = interiors_of(LB)
+    assert ids, 'landblock %04X has no interior cells' % LB
+else:
+    have = {}
+    for i in src_cell.files:
+        if 0x0100 <= (i & 0xFFFF) < 0xFFFE:
+            have[i >> 16] = have.get(i >> 16, 0) + 1
+    sized = sorted((n, lb) for lb, n in have.items() if 8 <= n <= 120)
+    assert sized, 'no interior landblock of a usable size in %s' % CELL
+    LB = sized[len(sized) // 2][1]
+    ids = interiors_of(LB)
 
 cells, envs = {}, set()
 for cid in ids:

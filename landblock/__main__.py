@@ -17,9 +17,16 @@ import sys
 import time
 
 from . import world as acworld
-from . import render as acrender
 from .dat import open_dat
 from .geom import Geometry
+
+try:
+    from . import render as acrender
+except ImportError as exc:                # drawing is the only part that needs
+    sys.exit('map rendering needs Pillow and numpy, which are not installed '
+             '(%s).\n    pip install pillow numpy\nReading, comparing, '
+             'converting and writing dats need neither, so dungeon_diff.py, '
+             'dat_merge.py and build_restore.py work without them.' % exc)
 
 
 def surface_entry(world, lb, geom, depth=8):
@@ -169,11 +176,8 @@ def render_per_level(lb, cells, insts, links, world, path, args, sub, lines):
     head = 150
     sheet = Image.new('RGB', (cols * tw + 24, head + rows * th + 24), (255, 255, 255))
     dr = ImageDraw.Draw(sheet)
-    try:
-        f_t = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 34)
-        f_s = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 18)
-    except OSError:
-        f_t = f_s = ImageFont.load_default()
+    f_t = acrender._font(34, bold=True)
+    f_s = acrender._font(18)
     name = world.dungeon_name(lb) or 'Landblock 0x%04X' % lb
     dr.text((16, 14), name, fill=(20, 20, 30), font=f_t)
     y = 58

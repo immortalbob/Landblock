@@ -2,9 +2,22 @@
 
 Start to finish, from an empty folder. Every command is a single line for
 Windows `cmd.exe` — it uses `^` for continuation, never `\`, so do not wrap
-them. On Linux or macOS use `python3` the same way.
+them. The same commands work on Linux and macOS.
 
 Nothing here modifies your input dats. Every step writes new files.
+
+**Which Python.** The commands below say `python3`. On Linux, macOS, and a
+Windows machine whose Python came from the Microsoft Store, that is the name.
+An installer from python.org gives you `python` and `py` instead, and
+`python3` comes back "not recognized". Check once:
+
+```
+python3 --version
+```
+
+If that fails, try `python --version`, then `py --version`, and use whichever
+answers for every command that follows. Python 3.6 or newer; nothing here uses
+anything more recent.
 
 ---
 
@@ -37,11 +50,13 @@ copy "C:\path\to\new\client_cell_1.dat"  new_cell.dat
 copy "C:\path\to\new\client_portal.dat"  new_portal.dat
 ```
 
-Only the map step needs libraries:
+Only the map step, step 7, needs libraries. Skip this until you get there:
 
 ```
 pip install pillow numpy
 ```
+
+Diffing, merging and building patches use nothing but the standard library.
 
 Each dat pair must be **from the same client**. A cell dat names its rooms by
 id and the portal dat supplies them, so a mismatched pair silently loses
@@ -216,15 +231,32 @@ even with records added — a tighter index and no dead blocks, not lost data.
 python3 dungeon_diff.py --validate new_cell.restored.dat
 ```
 
-The broken count must be no worse than step 1. Then confirm the restored
-dungeons match where they came from:
+The broken count must be no worse than step 1, and the landblock count should
+have gone up by exactly the number of dungeons you restored.
+
+Then confirm each dungeon actually arrived intact:
 
 ```
-python3 dungeon_diff.py --old-cell old_cell.dat --old-portal old_portal.dat --new-cell new_cell.restored.dat --kind dungeon --out check.csv
+python3 dungeon_diff.py --verify-restore old_cell.dat new_cell.restored.dat myset\manifest.json
 ```
 
-Every landblock you restored should now be absent from `check.csv`, or sitting
-at 0% — it matches the old client because it *is* the old client's version.
+```
+old_cell.dat -> new_cell.restored.dat, following manifest.json
+   46 of 46 restored dungeons are identical to their source
+   42 of those were relocated, so their original landblock still holds the target's own version
+```
+
+It follows the manifest from step 4, so it compares each dungeon against the
+landblock it actually went to, and reports anything that is missing, the wrong
+size, structurally broken, or different in content. Anything less than *all of
+them* is a failure worth stopping for.
+
+**Do not verify this with a plain diff.** Running step 2 again against the
+patched dat will still show your dungeons as 100% changed, and that is not a
+failure. Most dungeons get relocated because their original landblock was
+occupied, so the restored copy lives at a new id while the target's own version
+stays exactly where it was. A diff matches by landblock id and has no idea the
+two are related; only the manifest knows where things went.
 
 ---
 
@@ -265,6 +297,9 @@ copy new_cell.restored.dat client_cell_1.dat
 | `is tod but the base is pretod` | patch and target are different generations |
 | `%d patch records already exist` | two patches collide; use `--avoid` when building |
 | `cannot find the landblock package` | `landblock\` must sit beside the scripts |
+| `'python3' is not recognized` | use `python` or `py` — see "Which Python" above |
+| `map rendering needs Pillow and numpy` | `pip install pillow numpy`; only step 7 needs them |
+| restored dungeons still show 100% changed | expected after relocation; use `--verify-restore` |
 | `SyntaxError` on a path like `dmreleasedats\CELL.DAT` | use forward slashes in paths you pass to Python |
 
 Everything here is verified against the format and against real client data —
