@@ -17,11 +17,20 @@ import os
 import struct
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                'src', 'landblock_source'))
+# find the landblock package whether this script sits beside it, inside the
+# source tree, or next to an unzipped release
+_here = os.path.dirname(os.path.abspath(__file__))
+for _c in (_here, os.path.join(_here, 'src', 'landblock_source'),
+           os.path.join(_here, '..'), os.path.join(_here, 'landblock_source')):
+    if os.path.isdir(os.path.join(_c, 'landblock')):
+        sys.path.insert(0, _c)
+        break
+else:
+    sys.exit('cannot find the landblock package. Unzip the release so that '
+             'landblock/ and dungeon_diff.py sit beside this script.')
 import dungeon_diff as dd                                     # noqa: E402
 from landblock import transcode as T                          # noqa: E402
-from landblock.datwrite import write_tod_dat                  # noqa: E402
+from landblock.datwrite import write_tod_dat, write_old_dat   # noqa: E402
 
 TIERS = {
     1: [0x0363, 0x0364, 0x0365, 0x0366, 0x0367, 0x0368, 0x565F, 0xBD59, 0xBD5A],
@@ -103,6 +112,18 @@ def main():
     oi = dd.interiors(oc)
     new_used = {i >> 16 for i in nc.files if 0x0100 <= (i & 0xFFFF) < 0xFFFE}
 
+    # a patch has to be written in the target's own format. Converting the
+    # other way -- retail records back to the original layout -- is not
+    # implemented, so that combination is refused rather than half-done.
+    target_era = nc.era
+    convert = (oc.era == 'pretod' and target_era == 'tod')
+    if oc.era == 'tod' and target_era == 'pretod':
+        raise SystemExit('cannot put retail-format records into an original-era '
+                         'dat: the reverse conversion is not implemented')
+    if oc.era != target_era and not convert:
+        raise SystemExit('unhandled era pair: source %s, target %s'
+                         % (oc.era, target_era))
+
     if args.landblocks:
         todo = [int(x, 16) for x in args.landblocks.replace(' ', '').split(',') if x]
     else:
@@ -133,8 +154,11 @@ def main():
     for e in miss_env:
         if e not in op.files:
             raise SystemExit('mesh %08X is absent from the source portal too' % e)
-        out = T.environment_to_tod(op.get(e))
-        T.verify_environment(op.get(e), out)
+        if convert:
+            out = T.environment_to_tod(op.get(e))
+            T.verify_environment(op.get(e), out)
+        else:
+            out = op.get(e)
         carried_meshes[e] = out
 
     # a prop carries its own surface list, and those surfaces may be absent
@@ -153,6 +177,9 @@ def main():
     # ---- surfaces, with their texture chains rebuilt for retail
     for surf_id in miss_surf:
         b = op.get(surf_id)
+        if not convert:
+            portal[surf_id] = b            # same generation: copy it through
+            continue
         typ = struct.unpack_from('<I', b, 4)[0]
         if not (typ & 6):
             portal[surf_id] = T.surface_to_tod(b)             # solid colour
@@ -177,7 +204,7 @@ def main():
         if prop not in op.files:
             dropped_props.add(prop); continue
         try:
-            out = T.gfxobj_to_tod(op.get(prop))
+            out = T.gfxobj_to_tod(op.get(prop)) if convert else op.get(prop)
         except Exception as exc:
             if not args.drop_missing_props:
                 raise SystemExit('cannot carry prop %08X: %s' % (prop, exc))
@@ -195,17 +222,29 @@ def main():
     # ---- cells
     cells = {}
     manifest = []
+    dropped_orphans = {}
     for lb in todo:
         dst = placement[lb]
+        # take only what the LandBlockInfo counts as live, and refuse to emit
+        # anything that would not look like real client data
+        keep = dd.live_cells(oc, lb, oi[lb])
+        if len(keep) != len(oi[lb]):
+            dropped_orphans[lb] = len(oi[lb]) - len(keep)
+        problems = dd.validate_landblock(oc, lb, keep)
+        if problems:
+            raise SystemExit('%04X fails validation: %s' % (lb, '; '.join(problems)))
         n = 0
-        for cid in sorted(oi[lb]):
+        for cid in sorted((lb << 16) | k for k in keep):
             buf = oc.get(cid)
             if dropped_props:
                 buf = strip_props(buf, oc.era, dropped_props)
-            moved, new_id = T.relocate_envcell(buf, dst)
-            tod = T.envcell_to_tod(moved)
-            T.verify_envcell(moved, tod)
-            cells[new_id] = tod
+            moved, new_id = T.relocate_envcell(buf, dst, era=oc.era)
+            if convert:
+                rec = T.envcell_to_tod(moved)
+                T.verify_envcell(moved, rec)
+            else:
+                rec = moved
+            cells[new_id] = rec
             n += 1
         cells[(dst << 16) | 0xFFFE] = struct.pack('<4I', (dst << 16) | 0xFFFE, n, 0, 0)
         manifest.append(dict(source='%04X' % lb, target='%04X' % dst,
@@ -214,18 +253,25 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
     cpath = os.path.join(args.out_dir, 'restore_cell.dat')
     ppath = os.path.join(args.out_dir, 'restore_portal.dat')
-    write_tod_dat(cpath, cells, block_size=0x400, data_set=2)
-    if portal:
-        write_tod_dat(ppath, portal, block_size=0x400, data_set=1)
+    if target_era == 'tod':
+        write_tod_dat(cpath, cells, block_size=0x400, data_set=2)
+        if portal:
+            write_tod_dat(ppath, portal, block_size=0x400, data_set=1)
+    else:
+        write_old_dat(cpath, cells, block_size=nc.block_size)
+        if portal:
+            write_old_dat(ppath, portal, block_size=0x400)
     with open(os.path.join(args.out_dir, 'manifest.json'), 'w') as fh:
         json.dump(dict(tier=args.tier, source=os.path.basename(args.old_cell),
                        placement=manifest,
                        portal_records=sorted('%08X' % k for k in portal),
-                       dropped_props=sorted('%08X' % p for p in dropped_props)),
+                       dropped_props=sorted('%08X' % p for p in dropped_props),
+                       dropped_orphans={'%04X' % k: v for k, v in dropped_orphans.items()}),
                   fh, indent=2)
 
-    print('%d dungeons, %d cell records, %d portal records'
-          % (len(todo), len(cells), len(portal)))
+    print('%d dungeons, %d cell records, %d portal records  [%s source -> %s target%s]'
+          % (len(todo), len(cells), len(portal), oc.era, target_era,
+             ', converting' if convert else ', same format'))
     if carried_meshes:
         print('  room meshes carried over: %s'
               % ' '.join('%08X' % m for m in sorted(carried_meshes)))
@@ -236,6 +282,10 @@ def main():
             print('     %s -> %s  (%d cells)' % (m['source'], m['target'], m['cells']))
     if dropped_props:
         print('  props dropped: %s' % ' '.join('%08X' % p for p in sorted(dropped_props)))
+    if dropped_orphans:
+        print('  orphan cells left behind (not counted by the LandBlockInfo):')
+        for lb, n in sorted(dropped_orphans.items()):
+            print('     %04X: %d cells' % (lb, n))
     print('  wrote %s and %s' % (cpath, ppath if portal else '(no portal changes)'))
 
 

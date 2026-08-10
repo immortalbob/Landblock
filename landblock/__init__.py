@@ -23,7 +23,7 @@ from .annotations import Annotations
 from .datwrite import write_old_dat, write_tod_dat
 from .transcode import envcell_to_tod, environment_to_tod, relocate_envcell
 
-__version__ = '1.7.0'
+__version__ = '1.10.0'
 __all__ = ['dat', 'geom', 'world', 'render', 'annotations', 'datwrite',
            'transcode', 'Annotations', 'write_old_dat', 'write_tod_dat',
            'envcell_to_tod', 'environment_to_tod', 'relocate_envcell',

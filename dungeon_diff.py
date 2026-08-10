@@ -539,11 +539,122 @@ def compare(args):
     return rows
 
 
+
+def layout_signature(dat, lb, keys):
+    """A hash of what a landblock contains, independent of where it lives.
+
+    Two landblocks with the same signature hold the same dungeon registered
+    twice, which happens a lot: in one 2001 client, 287 changed landblocks are
+    only 46 distinct places. Restoring all of them would mean 241 duplicates.
+
+    Built from decoded fields rather than raw bytes, so it is also comparable
+    across the two container generations -- the same dungeon in the original
+    and retail encodings has different bytes but identical content, and a
+    byte hash would call them different every time.
+    """
+    import hashlib
+    h = hashlib.md5()
+    for k in sorted(keys):
+        c = parse_cell(dat.get((lb << 16) | k), dat.era)
+        h.update(struct.pack('<3I', k, c['flags'], c['env']))
+        h.update(struct.pack('<I', c['sidx']))
+        h.update(c['frame']); h.update(c['ports']); h.update(c['stabs'])
+        h.update(c['statics'])
+        for sfc in c['surfaces']:
+            h.update(struct.pack('<H', sfc))
+    return h.hexdigest()
+
+
+def run_dedupe(cell_path, csv_path, min_struct=100.0, quiet=False):
+    """Group the changed landblocks in a diff CSV by what they actually hold.
+
+    Prints one representative per distinct layout, ready to paste into
+    build_restore.py --landblocks.
+    """
+    dat = Dat(cell_path)
+    idx = interiors(dat)
+    rows = [r for r in csv.DictReader(open(csv_path))
+            if not r['orphaned'] and float(r['struct_pct']) >= min_struct]
+    groups = collections.defaultdict(list)
+    for r in rows:
+        lb = int(r['landblock'], 16)
+        if lb not in idx:
+            continue
+        keys = [i & 0xFFFF for i in idx[lb]]
+        groups[layout_signature(dat, lb, live_cells(dat, lb, idx[lb]))].append(r['landblock'])
+    reps = sorted(min(v) for v in groups.values())
+    if not quiet:
+        cells = sum(len(live_cells(dat, int(x, 16), idx[int(x, 16)])) for x in reps)
+        print('%d landblocks at or above %.0f%% structural change'
+              % (len(rows), min_struct))
+        print('   %d distinct layouts, %d cells in total' % (len(reps), cells))
+        dupes = sorted((v for v in groups.values() if len(v) > 1), key=len, reverse=True)
+        for v in dupes[:6]:
+            print('   %d landblocks share one layout: %s%s'
+                  % (len(v), ' '.join(sorted(v)[:8]), ' ...' if len(v) > 8 else ''))
+        print()
+        print('--landblocks ' + ','.join(reps))
+    return reps
+
+
+def run_validate(path, quiet=False):
+    """Check every landblock in a cell dat against the invariants real client
+    data holds to. Returns the number that fail.
+
+    The list comes from what a client-format reader actually enforces --
+    DungeonViewer's own failure messages name them: the LandBlockInfo must be
+    there, every cell it implies must be there, and every cell a portal link
+    or visibility entry names must be there.
+    """
+    dat = Dat(path)
+    idx = interiors(dat)
+    failures = []
+    warnings = []
+    for lb in sorted(idx):
+        keys = sorted(i & 0xFFFF for i in idx[lb])
+        problems = validate_landblock(dat, lb, keys)
+        declared, _b = landblock_info(dat, lb)
+        if declared < 0:
+            problems.append('no LandBlockInfo')
+        if problems:
+            failures.append((lb, problems))
+        elif declared != len(keys):
+            # retail itself ships 38 landblocks like this, so it is survivable:
+            # orphan cells the LandBlockInfo stopped counting. Worth knowing
+            # about, not worth failing over.
+            warnings.append((lb, 'LandBlockInfo declares %d cells, %d present'
+                             % (declared, len(keys))))
+    if not quiet:
+        print('%s: %d landblocks with interiors' % (os.path.basename(path), len(idx)))
+        print('   %d broken (a reader following a reference will not find it)'
+              % len(failures))
+        for lb, problems in failures[:30]:
+            print('      %04X  %s' % (lb, '; '.join(problems)))
+        if len(failures) > 30:
+            print('      ... and %d more' % (len(failures) - 30))
+        print('   %d carrying uncounted orphan cells (survivable; retail does it too)'
+              % len(warnings))
+        for lb, w in warnings[:10]:
+            print('      %04X  %s' % (lb, w))
+        if len(warnings) > 10:
+            print('      ... and %d more' % (len(warnings) - 10))
+    return len(failures)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--old-cell', required=True)
-    ap.add_argument('--new-cell', required=True)
+    ap.add_argument('--validate', metavar='CELLDAT',
+                    help='check one cell dat against the structural invariants '
+                         'real client data holds to, and exit')
+    ap.add_argument('--dedupe', nargs=2, metavar=('CELLDAT', 'CHANGES_CSV'),
+                    help='group the changed landblocks in a diff CSV by what '
+                         'they actually contain, and print one representative '
+                         'per distinct layout')
+    ap.add_argument('--min-struct', type=float, default=100.0,
+                    help='structural change floor for --dedupe (default 100)')
+    ap.add_argument('--old-cell')
+    ap.add_argument('--new-cell')
     ap.add_argument('--old-portal')
     ap.add_argument('--new-portal')
     ap.add_argument('--out', default='dungeon_changes.csv')
@@ -557,8 +668,73 @@ def main():
                          ' treat that split as provisional.')
     ap.add_argument('--all', action='store_true',
                     help='also list landblocks that did not change')
-    compare(ap.parse_args())
+    args = ap.parse_args()
+    if args.validate:
+        raise SystemExit(1 if run_validate(args.validate) else 0)
+    if args.dedupe:
+        run_dedupe(args.dedupe[0], args.dedupe[1], args.min_struct)
+        raise SystemExit(0)
+    if not (args.old_cell and args.new_cell):
+        ap.error('need --old-cell and --new-cell, or --validate')
+    compare(args)
 
+
+# ------------------------------------------------- landblock sanity checking
+
+def live_cells(dat, lb, ids):
+    """The cells that actually make up the landblock's interior.
+
+    A dat accumulates orphans: cells left behind when content was retired,
+    which the LandBlockInfo stops counting but nothing deletes. The
+    LandBlockInfo is authoritative, so where it declares a count and that many
+    cells are present contiguously from 0x100, that prefix is the live dungeon
+    and anything past it is dead weight.
+
+    Copying the dead weight produces a landblock with holes in its cell
+    numbering and references pointing at cells that are not there. No native
+    landblock looks like that -- all 3,409 in an end-of-retail cell dat number
+    contiguously from 0x100 -- so a reader is entitled to assume otherwise,
+    and one that follows a stab list into a hole will crash.
+    """
+    have = {i & 0xFFFF for i in ids}
+    declared, _buildings = landblock_info(dat, lb)
+    if declared > 0:
+        prefix = set(range(0x100, 0x100 + declared))
+        if prefix <= have:
+            return sorted(prefix)
+    return sorted(have)
+
+
+def validate_landblock(dat, lb, keys):
+    """Check a landblock against the invariants real client data holds to.
+
+    Returns a list of problems; empty means it looks like something the game
+    shipped. keys are 16-bit cell ids.
+    """
+    problems = []
+    keys = sorted(keys)
+    if not keys:
+        return ['no cells']
+    if keys != list(range(0x100, 0x100 + len(keys))):
+        holes = keys[-1] - keys[0] + 1 - len(keys)
+        problems.append('cell ids are not contiguous from 0x100 '
+                        '(%03X..%03X with %d missing)' % (keys[0], keys[-1], holes))
+    present = set(keys)
+    dangling_p = dangling_s = 0
+    for k in keys:
+        c = parse_cell(dat.get((lb << 16) | k), dat.era)
+        for j in range(0, len(c['ports']), 8):
+            fl, _poly, other, _op = struct.unpack_from('<4H', c['ports'], j)
+            if not (fl & 0x04) and other not in present:
+                dangling_p += 1
+        for j in range(0, len(c['stabs']), 2):
+            if struct.unpack_from('<H', c['stabs'], j)[0] not in present:
+                dangling_s += 1
+    if dangling_p:
+        problems.append('%d portal links point at a missing cell' % dangling_p)
+    if dangling_s:
+        problems.append('%d visibility entries point at a missing cell' % dangling_s)
+    return problems
 
 if __name__ == '__main__':
     main()

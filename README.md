@@ -277,6 +277,9 @@ and `read_environment` / `read_environment_old` parse `0x0D` meshes.
 
 ## Working with the dats directly
 
+**[HOWTO.md](HOWTO.md) is the step-by-step walkthrough** — empty folder to
+patched client, with pastable commands. What follows is reference.
+
 Three command-line tools sit alongside the map generator. All of them read
 either container generation, and none of them ever writes to an input file.
 
@@ -394,6 +397,50 @@ Verified across every dat tested: 546,064 cells and 665 meshes convert and
 re-verify field-for-field, including UV runs, per-polygon surface indices,
 stippling, cull mode and full BSP trees.
 
+### Finding the distinct dungeons in a diff
+
+```bash
+python3 dungeon_diff.py --dedupe cell.dat changes.csv
+```
+
+One layout is often registered at many landblocks, so a diff overstates how
+much distinct content changed. Hashing each landblock's cells with its own id
+masked out collapses the duplicates: on a September 2001 client, 287 changed
+landblocks turn out to be 46 distinct places. It prints one representative per
+layout, formatted to paste straight into `build_restore.py --landblocks`.
+
+`--min-struct` sets the structural-change floor, default 100 — that is, only
+dungeons the newer client rebuilt outright, whose old form survives nowhere
+else.
+
+### Checking a dat looks like real client data
+
+```bash
+python3 dungeon_diff.py --validate client_cell_1.dat
+```
+
+Parsing cleanly is not the same as being loadable. Real client data holds to
+structural invariants that nothing in the format enforces, and a reader is
+entitled to assume them: every landblock numbers its cells contiguously from
+0x100, and every cell a portal link or visibility entry names is present. All
+3,409 landblocks in an end-of-retail cell dat satisfy both.
+
+Content assembled from an older client can break them, because dats accumulate
+orphans — cells left behind when content was retired, which the LandBlockInfo
+stops counting but nothing deletes. Copy those along with the live ones and you
+get a landblock with holes and references pointing into them. A viewer that
+follows one of those crashes; that is not the viewer being fragile.
+
+`--validate` separates two severities, because running it against retail
+settled which is which. A break is fatal: something names a cell that is not
+there. An orphan count is survivable — retail itself ships 38 landblocks whose
+LandBlockInfo undercounts, so the client evidently copes.
+
+`build_restore.py` applies the same rule when it selects cells: the
+LandBlockInfo is authoritative, so where it declares a count and those cells
+are present contiguously, that prefix is the dungeon and the rest is dead
+weight. It refuses to emit a landblock that fails validation.
+
 ### Restoring content
 
 `build_restore.py` assembles a patch that puts dungeons from an older client
@@ -426,9 +473,10 @@ the real portal.dat is not.
 | `landblock/transcode.py` | original-era records re-encoded to the retail layout |
 | `landblock/__main__.py` | command line |
 | `landblock/enums.json` | WeenieType and CreatureType, exported from ACE |
-| `dungeon_diff.py` | compare two client eras, standalone |
+| `dungeon_diff.py` | compare two client eras, and `--validate` a dat, standalone |
 | `dat_merge.py` | streaming merge and round-trip verification, standalone |
 | `build_restore.py` | assemble a restoration patch |
+| `HOWTO.md` | start-to-finish walkthrough |
 
 `dungeon_diff.py` and `dat_merge.py` are self-contained — they carry their own
 dat reader and need nothing but Python, so they can be dropped next to a
@@ -477,6 +525,9 @@ valid ToD-format containers and meshes in memory and reading them back.
 * Retail's `RenderSurface` header carries a field whose meaning is unknown.
   Converted textures use the value most common for their size and format; it
   does not affect how the pixels are read.
+* `--validate` checks the invariants known to matter. It is a list learned
+  from what real readers enforce, not a proof of loadability — there may be
+  others not yet discovered.
 * Telling caves from buildings in `dungeon_diff.py` rests on whether the
   LandBlockInfo registers a building, and a cave mouth registers the same way
   a house does. Dungeons are separated reliably; that split is not.
